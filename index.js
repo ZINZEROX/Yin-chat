@@ -458,6 +458,89 @@ app.get("/key", (req, res) => {
 </html>`);
 });
 
+// ─── AI CHAT ───────────────────────────────────────────────────────────────────
+const AI_NAME = process.env.AI_NAME || "Yin AI";
+const AI_MODEL = process.env.AI_MODEL || "openai/gpt-oss-20b";
+const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT ||
+    "Eres la IA de Yin Yang. Responde de forma directa, útil y concisa.";
+
+app.get("/api/ai/config", (req, res) => {
+    res.json({
+        success: true,
+        enabled: Boolean(process.env.GROQ_API_KEY),
+        name: AI_NAME,
+        model: AI_MODEL,
+    });
+});
+
+app.post("/api/ai/chat", async (req, res) => {
+    const { messages } = req.body || {};
+
+    if (!process.env.GROQ_API_KEY) {
+        return res.status(503).json({
+            success: false,
+            error: "AI not configured on the server",
+        });
+    }
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({
+            success: false,
+            error: "messages must be a non-empty array",
+        });
+    }
+
+    const safeMessages = messages
+        .filter(msg => msg && (msg.role === "user" || msg.role === "assistant") && typeof msg.content === "string")
+        .slice(-20)
+        .map(msg => ({
+            role: msg.role,
+            content: String(msg.content).slice(0, 4000),
+        }));
+
+    try {
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+            },
+            body: JSON.stringify({
+                model: AI_MODEL,
+                messages: [
+                    { role: "system", content: AI_SYSTEM_PROMPT },
+                    ...safeMessages,
+                ],
+                max_completion_tokens: 512,
+                temperature: 0.7,
+            }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            console.warn("[AI] Provider error:", response.status, data?.error?.message || "unknown error");
+            return res.status(502).json({
+                success: false,
+                error: data?.error?.message || "AI provider error",
+            });
+        }
+
+        const reply = data?.choices?.[0]?.message?.content;
+        if (!reply) {
+            return res.status(502).json({
+                success: false,
+                error: "AI returned an empty response",
+            });
+        }
+
+        res.json({ success: true, name: AI_NAME, reply: String(reply) });
+    } catch (err) {
+        console.warn("[AI] Request error:", err.message);
+        res.status(502).json({ success: false, error: "AI request failed" });
+    }
+});
+
 // ─── WEB CHAT ─────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
     res.send(`<!DOCTYPE html>
@@ -465,100 +548,150 @@ app.get("/", (req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0a0a0f">
 <title>Yin Global Chat</title>
 <style>
+  :root {
+    --bg: #08080c;
+    --panel: rgba(20,20,28,.88);
+    --panel-2: rgba(27,27,38,.92);
+    --line: rgba(255,255,255,.08);
+    --text: #f4f2f7;
+    --muted: #94919f;
+    --accent: #b66cff;
+    --accent-2: #e08cff;
+    --mine: #7c4dff;
+  }
   * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; }
   body {
     margin: 0;
-    min-height: 100vh;
-    background: #0f0f13;
-    color: #e8e8f0;
-    font-family: 'Segoe UI', sans-serif;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    color: var(--text);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background:
+      radial-gradient(circle at 15% 15%, rgba(174,83,255,.16), transparent 30%),
+      radial-gradient(circle at 85% 85%, rgba(86,71,255,.13), transparent 32%),
+      var(--bg);
+    display: grid;
+    place-items: center;
     padding: 18px;
   }
-  .chat {
-    width: min(720px, 100%);
-    height: min(760px, calc(100vh - 36px));
-    min-height: 500px;
-    background: #17171f;
-    border: 1px solid #2e2e42;
-    border-radius: 18px;
+  button, input { font: inherit; }
+  .shell {
+    width: min(1120px, 100%);
+    height: min(820px, calc(100vh - 36px));
+    min-height: 560px;
+    display: grid;
+    grid-template-columns: 250px minmax(0, 1fr);
     overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 26px;
+    background: rgba(12,12,17,.82);
+    box-shadow: 0 30px 90px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.04);
+    backdrop-filter: blur(24px);
+  }
+  .sidebar {
     display: flex;
     flex-direction: column;
-    box-shadow: 0 18px 50px rgba(0,0,0,.35);
+    padding: 22px 16px;
+    border-right: 1px solid var(--line);
+    background: rgba(10,10,14,.62);
   }
-  .header {
-    padding: 16px 18px;
-    border-bottom: 1px solid #2b2b39;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+  .brand { display: flex; align-items: center; gap: 11px; padding: 4px 8px 24px; }
+  .brand-mark {
+    width: 40px; height: 40px; border-radius: 13px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #c77dff, #6c63ff); box-shadow: 0 8px 26px rgba(139,92,246,.3); font-size: 21px;
   }
-  .title { font-size: 18px; font-weight: 700; }
-  .online { color: #8f8f9f; font-size: 13px; }
+  .brand-title { font-weight: 800; letter-spacing: -.3px; }
+  .brand-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .nav { display: grid; gap: 6px; }
+  .nav-item {
+    padding: 11px 12px; border-radius: 12px; color: #aaa7b4; font-size: 13px; display: flex; align-items: center; gap: 10px;
+  }
+  .nav-item.active { color: #fff; background: rgba(182,108,255,.13); border: 1px solid rgba(182,108,255,.16); }
+  .status-card { margin-top: auto; padding: 13px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255,255,255,.025); }
+  .status-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #35d27d; box-shadow: 0 0 12px #35d27d; }
+  .main { min-width: 0; display: flex; flex-direction: column; background: linear-gradient(180deg, rgba(255,255,255,.018), transparent 35%); }
+  .topbar {
+    min-height: 74px; padding: 15px 22px; display: flex; align-items: center; justify-content: space-between; gap: 15px;
+    border-bottom: 1px solid var(--line); background: rgba(10,10,14,.55); backdrop-filter: blur(16px);
+  }
+  .room-title { font-size: 16px; font-weight: 800; }
+  .room-sub { margin-top: 3px; color: var(--muted); font-size: 11px; }
+  .online-pill { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 999px; color: #c7c4cf; font-size: 12px; background: rgba(255,255,255,.025); }
   .messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 18px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    flex: 1; min-height: 0; overflow-y: auto; padding: 24px 26px; display: flex; flex-direction: column; gap: 17px;
+    scrollbar-width: thin; scrollbar-color: #3a3745 transparent;
   }
-  .message {
-    background: #20202a;
-    border: 1px solid #2c2c3a;
-    border-radius: 12px;
-    padding: 10px 12px;
-  }
-  .name { font-size: 13px; font-weight: 700; color: #a78bfa; margin-bottom: 4px; }
-  .text { font-size: 14px; line-height: 1.4; word-break: break-word; }
-  .time { margin-top: 5px; color: #777785; font-size: 11px; }
-  .empty { margin: auto; color: #777785; font-size: 13px; text-align: center; }
-  .controls { padding: 14px; border-top: 1px solid #2b2b39; }
+  .day { text-align: center; color: #6f6c77; font-size: 10px; margin: 2px 0 3px; }
+  .message-row { display: flex; gap: 10px; align-items: flex-end; max-width: 86%; }
+  .message-row.mine { align-self: flex-end; flex-direction: row-reverse; }
+  .avatar { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 11px; display: grid; place-items: center; background: #25232e; color: #c8b7ff; font-weight: 800; font-size: 12px; border: 1px solid var(--line); }
+  .bubble-wrap { min-width: 0; }
+  .meta { display: flex; align-items: center; gap: 8px; margin: 0 7px 5px; color: #8e8a98; font-size: 10px; }
+  .message-row.mine .meta { justify-content: flex-end; }
+  .bubble { padding: 10px 13px; border: 1px solid var(--line); border-radius: 16px 16px 16px 5px; background: var(--panel-2); box-shadow: 0 6px 20px rgba(0,0,0,.14); line-height: 1.48; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .message-row.mine .bubble { border-radius: 16px 16px 5px 16px; background: linear-gradient(135deg, #7a4cff, #9d5dff); border-color: rgba(255,255,255,.12); color: #fff; }
+  .composer { padding: 14px 18px 17px; border-top: 1px solid var(--line); background: rgba(9,9,13,.72); }
   .identity { display: flex; gap: 8px; margin-bottom: 9px; }
-  input, button {
-    border: 1px solid #343447;
-    border-radius: 10px;
-    background: #101016;
-    color: #eeeef5;
-    font: inherit;
-  }
-  input { outline: none; }
-  #name { width: 150px; padding: 10px 12px; }
-  #message { flex: 1; padding: 11px 12px; }
-  button { padding: 10px 16px; cursor: pointer; background: #7c3aed; border-color: #7c3aed; font-weight: 600; }
-  button:disabled { opacity: .55; cursor: default; }
-  .send { display: flex; gap: 8px; }
-  .hint { color: #777785; font-size: 11px; margin-top: 8px; }
-  @media (max-width: 520px) {
-    .chat { height: calc(100vh - 20px); min-height: 0; border-radius: 14px; }
-    body { padding: 10px; }
-    #name { width: 120px; }
+  .field, .send-btn { border: 1px solid var(--line); outline: none; color: var(--text); background: rgba(255,255,255,.045); }
+  .field { border-radius: 13px; padding: 11px 13px; }
+  #name { width: 180px; }
+  .send-line { display: flex; gap: 9px; }
+  #message { flex: 1; min-width: 0; }
+  .send-btn { width: 50px; border-radius: 14px; cursor: pointer; background: linear-gradient(135deg, #9b59ff, #c16bff); border: 0; font-size: 18px; box-shadow: 0 8px 22px rgba(155,89,255,.2); }
+  .send-btn:disabled { opacity: .45; cursor: default; }
+  .hint { margin: 8px 4px 0; color: #66636f; font-size: 10px; }
+  .empty { margin: auto; text-align: center; color: #777480; }
+  .empty-icon { width: 52px; height: 52px; display: grid; place-items: center; margin: 0 auto 10px; border-radius: 17px; background: rgba(182,108,255,.1); font-size: 24px; }
+  .typing { display: inline-flex; gap: 4px; padding: 10px 13px; border-radius: 15px; background: #20202a; border: 1px solid var(--line); }
+  .typing i { width: 5px; height: 5px; border-radius: 50%; background: #aaa5b4; animation: pulse 1s infinite ease-in-out; }
+  .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
+  @keyframes pulse { 0%, 60%, 100% { transform: translateY(0); opacity: .45; } 30% { transform: translateY(-3px); opacity: 1; } }
+  @media (max-width: 760px) {
+    body { padding: 0; }
+    .shell { width: 100%; height: 100vh; min-height: 0; border-radius: 0; grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .messages { padding: 18px 14px; }
+    .message-row { max-width: 94%; }
+    .topbar { padding: 13px 15px; }
+    .composer { padding: 11px 11px 14px; }
+    #name { width: 135px; }
   }
 </style>
 </head>
 <body>
-<div class="chat">
-  <div class="header">
-    <div class="title">☯️ Yin Global Chat</div>
-    <div class="online" id="online">0 online</div>
-  </div>
-  <div class="messages" id="messages"><div class="empty">Cargando mensajes...</div></div>
-  <div class="controls">
-    <div class="identity">
-      <input id="name" maxlength="32" placeholder="Tu nombre" autocomplete="off">
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">☯</div>
+      <div><div class="brand-title">Yin Yang</div><div class="brand-sub">Global community</div></div>
     </div>
-    <div class="send">
-      <input id="message" maxlength="500" placeholder="Escribe un mensaje..." autocomplete="off">
-      <button id="send" type="button">Enviar</button>
+    <div class="nav">
+      <div class="nav-item active">💬 <span>Global Chat</span></div>
+      <div class="nav-item">🤖 <span>Yin AI</span></div>
+      <div class="nav-item">🎵 <span>Spotify</span></div>
     </div>
-    <div class="hint">Los mensajes de esta página usan el mismo Global Chat que la librería.</div>
-  </div>
+    <div class="status-card">
+      <div class="status-row"><span>Servidor</span><span class="dot"></span></div>
+      <div style="color:#777480;font-size:10px;margin-top:6px">Render • tiempo real</div>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div><div class="room-title">Global Chat</div><div class="room-sub">Mensajes compartidos con la librería Yin Yang</div></div>
+      <div class="online-pill"><span class="dot"></span><span id="online">0 online</span></div>
+    </header>
+    <section class="messages" id="messages">
+      <div class="empty"><div class="empty-icon">☯</div><div>Conectando al Global Chat...</div></div>
+    </section>
+    <footer class="composer">
+      <div class="identity"><input class="field" id="name" maxlength="32" placeholder="Tu nombre" autocomplete="off"></div>
+      <div class="send-line"><input class="field" id="message" maxlength="500" placeholder="Escribe un mensaje..." autocomplete="off"><button class="send-btn" id="send" type="button" aria-label="Enviar">➤</button></div>
+      <div class="hint">Tip: en la librería, usa <b>/IA hola</b> para hablar con la IA.</div>
+    </footer>
+  </main>
 </div>
 <script>
   const nameInput = document.getElementById('name');
@@ -572,27 +705,30 @@ app.get("/", (req, res) => {
   function escapeHtml(value) {
     return String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
   }
-
+  function initials(name) {
+    return String(name || '?').trim().slice(0, 2).toUpperCase();
+  }
   function render(data) {
     const list = Array.isArray(data.messages) ? data.messages : [];
     onlineBox.textContent = String(Number(data.onlineCount || 0)) + ' online';
     const signature = JSON.stringify(list.map(m => [m.id, m.playerName, m.message, m.timestamp]));
     if (signature === lastSignature) return;
     lastSignature = signature;
-
     if (!list.length) {
-      messagesBox.innerHTML = '<div class="empty">Todavía no hay mensajes.</div>';
+      messagesBox.innerHTML = '<div class="empty"><div class="empty-icon">☯</div><div>Todavía no hay mensajes.<br>Empieza la conversación.</div></div>';
       return;
     }
-
     messagesBox.innerHTML = list.map(m => {
+      const mine = String(m.playerId) === String(playerId);
       const date = new Date(Number(m.timestamp) * 1000);
       const time = isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-      return '<div class="message"><div class="name">' + escapeHtml(m.playerName) + '</div><div class="text">' + escapeHtml(m.message) + '</div><div class="time">' + time + '</div></div>';
+      return '<div class="message-row ' + (mine ? 'mine' : '') + '">' +
+        '<div class="avatar">' + escapeHtml(initials(m.playerName)) + '</div>' +
+        '<div class="bubble-wrap"><div class="meta"><b>' + escapeHtml(m.playerName) + '</b><span>' + time + '</span></div>' +
+        '<div class="bubble">' + escapeHtml(m.message) + '</div></div></div>';
     }).join('');
     messagesBox.scrollTop = messagesBox.scrollHeight;
   }
-
   async function loadMessages() {
     try {
       const response = await fetch('/api/chat/messages', {cache: 'no-store'});
@@ -602,17 +738,14 @@ app.get("/", (req, res) => {
       onlineBox.textContent = 'Sin conexión';
     }
   }
-
   async function sendMessage() {
     const playerName = nameInput.value.trim();
     const message = messageInput.value.trim();
     if (!playerName || !message || sendButton.disabled) return;
-
     sendButton.disabled = true;
     try {
       const response = await fetch('/api/chat/send', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({playerName, playerId, message})
       });
       const data = await response.json();
@@ -626,11 +759,8 @@ app.get("/", (req, res) => {
       sendButton.disabled = false;
     }
   }
-
   sendButton.addEventListener('click', sendMessage);
-  messageInput.addEventListener('keydown', event => {
-    if (event.key === 'Enter') sendMessage();
-  });
+  messageInput.addEventListener('keydown', event => { if (event.key === 'Enter') sendMessage(); });
   loadMessages();
   setInterval(loadMessages, 2000);
 </script>

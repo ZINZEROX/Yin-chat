@@ -464,81 +464,134 @@ const AI_MODEL = process.env.AI_MODEL || "openai/gpt-oss-20b";
 const AI_SYSTEM_PROMPT = process.env.AI_SYSTEM_PROMPT ||
     "Eres la IA de Yin Yang. Responde de forma directa, útil y concisa.";
 
+const AI_PROVIDERS = [
+    {
+        name: "Groq",
+        key: "GROQ_API_KEY",
+        url: "https://api.groq.com/openai/v1/chat/completions",
+        model: process.env.GROQ_MODEL || AI_MODEL,
+    },
+    {
+        name: "OpenRouter",
+        key: "OPENROUTER_API_KEY",
+        url: "https://openrouter.ai/api/v1/chat/completions",
+        model: process.env.OPENROUTER_MODEL || "openai/gpt-oss-20b:free",
+    },
+    {
+        name: "Gemini",
+        key: "GEMINI_API_KEY",
+        url: "https://generativelanguage.googleapis.com/v1beta/models/",
+        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    },
+];
+
+function getConfiguredAIProviders() {
+    return AI_PROVIDERS.filter(provider => Boolean(process.env[provider.key]));
+}
+
+async function requestOpenAICompatibleProvider(provider, messages) {
+    const response = await fetch(provider.url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env[provider.key]}`,
+        },
+        body: JSON.stringify({
+            model: provider.model,
+            messages: [
+                { role: "system", content: AI_SYSTEM_PROMPT },
+                ...messages,
+            ],
+            max_completion_tokens: 512,
+            temperature: 0.7,
+        }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(`${provider.name} ${response.status}: ${data?.error?.message || "provider error"}`);
+    }
+
+    const reply = data?.choices?.[0]?.message?.content;
+    if (!reply) throw new Error(`${provider.name}: empty response`);
+    return String(reply);
+}
+
+async function requestGeminiProvider(provider, messages) {
+    const contents = messages.map(msg => ({
+        role: msg.role === "assistant" ? "model" : "user",
+        parts: [{ text: msg.content }],
+    }));
+
+    const response = await fetch(`${provider.url}${encodeURIComponent(provider.model)}:generateContent?key=${encodeURIComponent(process.env[provider.key])}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            systemInstruction: { parts: [{ text: AI_SYSTEM_PROMPT }] },
+            contents,
+            generationConfig: { temperature: 0.7, maxOutputTokens: 512 },
+        }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(`${provider.name} ${response.status}: ${data?.error?.message || "provider error"}`);
+    }
+
+    const reply = data?.candidates?.[0]?.content?.parts?.map(part => part.text || "").join("").trim();
+    if (!reply) throw new Error(`${provider.name}: empty response`);
+    return reply;
+}
+
 app.get("/api/ai/config", (req, res) => {
+    const providers = getConfiguredAIProviders();
     res.json({
         success: true,
-        enabled: Boolean(process.env.GROQ_API_KEY),
+        enabled: providers.length > 0,
         name: AI_NAME,
         model: AI_MODEL,
+        providers: providers.map(provider => provider.name),
     });
 });
 
 app.post("/api/ai/chat", async (req, res) => {
     const { messages } = req.body || {};
 
-    if (!process.env.GROQ_API_KEY) {
-        return res.status(503).json({
-            success: false,
-            error: "AI not configured on the server",
-        });
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ success: false, error: "messages must be a non-empty array" });
     }
 
-    if (!Array.isArray(messages) || messages.length === 0) {
-        return res.status(400).json({
-            success: false,
-            error: "messages must be a non-empty array",
-        });
+    const providers = getConfiguredAIProviders();
+    if (!providers.length) {
+        return res.status(503).json({ success: false, error: "AI not configured on the server" });
     }
 
     const safeMessages = messages
         .filter(msg => msg && (msg.role === "user" || msg.role === "assistant") && typeof msg.content === "string")
         .slice(-20)
-        .map(msg => ({
-            role: msg.role,
-            content: String(msg.content).slice(0, 4000),
-        }));
+        .map(msg => ({ role: msg.role, content: String(msg.content).slice(0, 4000) }));
 
-    try {
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-            },
-            body: JSON.stringify({
-                model: AI_MODEL,
-                messages: [
-                    { role: "system", content: AI_SYSTEM_PROMPT },
-                    ...safeMessages,
-                ],
-                max_completion_tokens: 512,
-                temperature: 0.7,
-            }),
-        });
+    const errors = [];
 
-        const data = await response.json();
+    for (const provider of providers) {
+        try {
+            const reply = provider.name === "Gemini"
+                ? await requestGeminiProvider(provider, safeMessages)
+                : await requestOpenAICompatibleProvider(provider, safeMessages);
 
-        if (!response.ok) {
-            console.warn("[AI] Provider error:", response.status, data?.error?.message || "unknown error");
-            return res.status(502).json({
-                success: false,
-                error: data?.error?.message || "AI provider error",
-            });
+            console.log(`[AI] ${provider.name} responded successfully`);
+            return res.json({ success: true, name: AI_NAME, reply, provider: provider.name });
+        } catch (err) {
+            errors.push(`${provider.name}: ${err.message}`);
+            console.warn(`[AI] ${provider.name} failed; trying next provider:`, err.message);
         }
-
-        const reply = data?.choices?.[0]?.message?.content;
-        if (!reply) {
-            return res.status(502).json({
-                success: false,
-                error: "AI returned an empty response",
-            });
-        }
-
-        res.json({ success: true, name: AI_NAME, reply: String(reply) });
-    } catch (err) {
-        console.warn("[AI] Request error:", err.message);
-        res.status(502).json({ success: false, error: "AI request failed" });
     }
+
+    res.status(502).json({
+        success: false,
+        error: "All configured AI providers failed",
+        details: errors,
+    });
 });
 
 // ─── WEB CHAT ─────────────────────────────────────────────────────────────────
@@ -612,7 +665,7 @@ app.get("/", (req, res) => {
   .status-card { margin-top: auto; padding: 13px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255,255,255,.025); }
   .status-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #35d27d; box-shadow: 0 0 12px #35d27d; }
-  .main { min-width: 0; display: flex; flex-direction: column; background: linear-gradient(180deg, rgba(255,255,255,.018), transparent 35%); }
+  .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: linear-gradient(180deg, rgba(255,255,255,.018), transparent 35%); }
   .topbar {
     min-height: 74px; padding: 15px 22px; display: flex; align-items: center; justify-content: space-between; gap: 15px;
     border-bottom: 1px solid var(--line); background: rgba(10,10,14,.55); backdrop-filter: blur(16px);
@@ -633,7 +686,7 @@ app.get("/", (req, res) => {
   .message-row.mine .meta { justify-content: flex-end; }
   .bubble { padding: 10px 13px; border: 1px solid var(--line); border-radius: 16px 16px 16px 5px; background: var(--panel-2); box-shadow: 0 6px 20px rgba(0,0,0,.14); line-height: 1.48; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .message-row.mine .bubble { border-radius: 16px 16px 5px 16px; background: linear-gradient(135deg, #7a4cff, #9d5dff); border-color: rgba(255,255,255,.12); color: #fff; }
-  .composer { padding: 14px 18px 17px; border-top: 1px solid var(--line); background: rgba(9,9,13,.72); }
+  .composer { flex: 0 0 auto; padding: 14px 18px 17px; border-top: 1px solid var(--line); background: rgba(9,9,13,.72); }
   .identity { display: flex; gap: 8px; margin-bottom: 9px; }
   .field, .send-btn { border: 1px solid var(--line); outline: none; color: var(--text); background: rgba(255,255,255,.045); }
   .field { border-radius: 13px; padding: 11px 13px; }

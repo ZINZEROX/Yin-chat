@@ -458,6 +458,186 @@ app.get("/key", (req, res) => {
 </html>`);
 });
 
+// ─── WEB CHAT ─────────────────────────────────────────────────────────────────
+app.get("/", (req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yin Global Chat</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #0f0f13;
+    color: #e8e8f0;
+    font-family: 'Segoe UI', sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+  }
+  .chat {
+    width: min(720px, 100%);
+    height: min(760px, calc(100vh - 36px));
+    min-height: 500px;
+    background: #17171f;
+    border: 1px solid #2e2e42;
+    border-radius: 18px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 18px 50px rgba(0,0,0,.35);
+  }
+  .header {
+    padding: 16px 18px;
+    border-bottom: 1px solid #2b2b39;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .title { font-size: 18px; font-weight: 700; }
+  .online { color: #8f8f9f; font-size: 13px; }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .message {
+    background: #20202a;
+    border: 1px solid #2c2c3a;
+    border-radius: 12px;
+    padding: 10px 12px;
+  }
+  .name { font-size: 13px; font-weight: 700; color: #a78bfa; margin-bottom: 4px; }
+  .text { font-size: 14px; line-height: 1.4; word-break: break-word; }
+  .time { margin-top: 5px; color: #777785; font-size: 11px; }
+  .empty { margin: auto; color: #777785; font-size: 13px; text-align: center; }
+  .controls { padding: 14px; border-top: 1px solid #2b2b39; }
+  .identity { display: flex; gap: 8px; margin-bottom: 9px; }
+  input, button {
+    border: 1px solid #343447;
+    border-radius: 10px;
+    background: #101016;
+    color: #eeeef5;
+    font: inherit;
+  }
+  input { outline: none; }
+  #name { width: 150px; padding: 10px 12px; }
+  #message { flex: 1; padding: 11px 12px; }
+  button { padding: 10px 16px; cursor: pointer; background: #7c3aed; border-color: #7c3aed; font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  .send { display: flex; gap: 8px; }
+  .hint { color: #777785; font-size: 11px; margin-top: 8px; }
+  @media (max-width: 520px) {
+    .chat { height: calc(100vh - 20px); min-height: 0; border-radius: 14px; }
+    body { padding: 10px; }
+    #name { width: 120px; }
+  }
+</style>
+</head>
+<body>
+<div class="chat">
+  <div class="header">
+    <div class="title">☯️ Yin Global Chat</div>
+    <div class="online" id="online">0 online</div>
+  </div>
+  <div class="messages" id="messages"><div class="empty">Cargando mensajes...</div></div>
+  <div class="controls">
+    <div class="identity">
+      <input id="name" maxlength="32" placeholder="Tu nombre" autocomplete="off">
+    </div>
+    <div class="send">
+      <input id="message" maxlength="500" placeholder="Escribe un mensaje..." autocomplete="off">
+      <button id="send" type="button">Enviar</button>
+    </div>
+    <div class="hint">Los mensajes de esta página usan el mismo Global Chat que la librería.</div>
+  </div>
+</div>
+<script>
+  const nameInput = document.getElementById('name');
+  const messageInput = document.getElementById('message');
+  const sendButton = document.getElementById('send');
+  const messagesBox = document.getElementById('messages');
+  const onlineBox = document.getElementById('online');
+  const playerId = 'web-' + Math.random().toString(36).slice(2) + Date.now();
+  let lastSignature = '';
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+  }
+
+  function render(data) {
+    const list = Array.isArray(data.messages) ? data.messages : [];
+    onlineBox.textContent = String(Number(data.onlineCount || 0)) + ' online';
+    const signature = JSON.stringify(list.map(m => [m.id, m.playerName, m.message, m.timestamp]));
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+
+    if (!list.length) {
+      messagesBox.innerHTML = '<div class="empty">Todavía no hay mensajes.</div>';
+      return;
+    }
+
+    messagesBox.innerHTML = list.map(m => {
+      const date = new Date(Number(m.timestamp) * 1000);
+      const time = isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      return '<div class="message"><div class="name">' + escapeHtml(m.playerName) + '</div><div class="text">' + escapeHtml(m.message) + '</div><div class="time">' + time + '</div></div>';
+    }).join('');
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+  }
+
+  async function loadMessages() {
+    try {
+      const response = await fetch('/api/chat/messages', {cache: 'no-store'});
+      if (!response.ok) throw new Error('request failed');
+      render(await response.json());
+    } catch (error) {
+      onlineBox.textContent = 'Sin conexión';
+    }
+  }
+
+  async function sendMessage() {
+    const playerName = nameInput.value.trim();
+    const message = messageInput.value.trim();
+    if (!playerName || !message || sendButton.disabled) return;
+
+    sendButton.disabled = true;
+    try {
+      const response = await fetch('/api/chat/send', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({playerName, playerId, message})
+      });
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'send failed');
+      messageInput.value = '';
+      await loadMessages();
+      messageInput.focus();
+    } catch (error) {
+      alert('No se pudo enviar el mensaje.');
+    } finally {
+      sendButton.disabled = false;
+    }
+  }
+
+  sendButton.addEventListener('click', sendMessage);
+  messageInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') sendMessage();
+  });
+  loadMessages();
+  setInterval(loadMessages, 2000);
+</script>
+</body>
+</html>`);
+});
+
 // ─── START ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
     console.log(`[ChatGlobal] Backend running on port ${PORT}`);

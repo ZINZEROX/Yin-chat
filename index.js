@@ -16,7 +16,6 @@ const RATE_LIMIT_MAX     = 8;    // mensajes máximos por playerId dentro de la 
 let messages      = [];
 let msgIdCounter  = 0;
 let onlineSeen    = {}; // playerId → unix timestamp last seen
-let hydraSeen     = {}; // playerId → unix timestamp last seen (solo usuarios de Hydra)
 let profiles      = {}; // playerId → { playerName, description, imageId }
 let pendingKeys   = {}; // username → { key, generatedAt, ip } — set by LootLabs postback
 
@@ -30,16 +29,6 @@ function cleanOnline() {
 function getOnlineCount() {
     cleanOnline();
     return Object.keys(onlineSeen).length;
-}
-
-function getHydraCount() {
-    const cutoff = Math.floor(Date.now() / 1000) - ONLINE_TTL;
-    let count = 0;
-    for (const id in hydraSeen) {
-        if (hydraSeen[id] < cutoff) delete hydraSeen[id];
-        else count++;
-    }
-    return count;
 }
 
 // Rate limit de /api/chat/send: playerId → timestamps de los últimos envíos
@@ -129,14 +118,6 @@ app.post("/api/heartbeat", (req, res) => {
     if (!playerId) return res.json({ ok: false, error: "missing playerId" });
     onlineSeen[String(playerId)] = Math.floor(Date.now() / 1000);
     res.json({ ok: true });
-});
-
-// ─── POST /api/hydra/heartbeat ───────────────────────────────────────────────
-app.post("/api/hydra/heartbeat", (req, res) => {
-    const { playerId } = req.body || {};
-    if (!playerId) return res.json({ ok: false, error: "missing playerId" });
-    hydraSeen[String(playerId)] = Math.floor(Date.now() / 1000);
-    res.json({ ok: true, count: getHydraCount() });
 });
 
 // ─── POST /api/translate ─────────────────────────────────────────────────────
